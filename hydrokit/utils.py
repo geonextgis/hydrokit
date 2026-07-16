@@ -41,7 +41,12 @@ def create_grids(roi, lat_resolution=0.25, lon_resolution=0.15):
 
     # Create GeoDataFrame
     grid = gpd.GeoDataFrame(
-        {"ID": np.arange(len(polygons)), "X": x_idx, "Y": y_idx, "geometry": polygons},
+        {
+            "ID": np.arange(1, len(polygons) + 1),
+            "X": x_idx,
+            "Y": y_idx,
+            "geometry": polygons,
+        },
         crs=roi.crs,
     )
 
@@ -50,35 +55,3 @@ def create_grids(roi, lat_resolution=0.25, lon_resolution=0.15):
     grid_roi = grid[grid.intersects(roi_union)].reset_index(drop=True)
 
     return grid_roi
-
-
-def create_domain(gdf, lat_buffer=0.05, lon_buffer=0.05):
-    """
-    Create rectangular buffers around each geometry in a GeoDataFrame
-    while preserving all attributes, with separate buffers for latitude and longitude.
-
-    Parameters:
-    - gdf: input GeoDataFrame (grid cells)
-    - lat_buffer: expansion distance in latitude
-    - lon_buffer: expansion distance in longitude
-
-    Returns:
-    - GeoDataFrame with expanded rectangles
-    """
-    new_geoms = []
-
-    for geom in gdf.geometry:
-        minx, miny, maxx, maxy = geom.bounds
-
-        # Expand bounds separately for lat and lon
-        minx -= lon_buffer
-        maxx += lon_buffer
-        miny -= lat_buffer
-        maxy += lat_buffer
-
-        new_geoms.append(box(minx, miny, maxx, maxy))
-
-    out_gdf = gdf.copy()
-    out_gdf["geometry"] = new_geoms
-
-    return out_gdf
