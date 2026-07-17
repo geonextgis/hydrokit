@@ -9,7 +9,9 @@
       "PowerShell(python -c \"import json; nb = json.load\\(open\\(r'C:\\\\HALDER\\\\GITHUB\\\\PROJECT\\\\hydrokit\\\\docs\\\\examples\\\\test_hydropy.ipynb'\\)\\); print\\(nb.get\\('metadata', {}\\).get\\('kernelspec', {}\\)\\)\")",
       "PowerShell(python -m pip install rasterio pysheds soilgrids)",
       "PowerShell(python -c \"import rasterio; import pysheds; import soilgrids; from hydrokit.input.watershed import get_dem; from hydrokit.utils import create_grids; from hydrokit.input import soil; print\\('all imports OK'\\)\")",
-      "PowerShell(python -c \"from hydrokit.input.lulc import get_lulc, ESA_WORLDCOVER_CLASSES; print\\('import OK'\\); print\\('classes:', len\\(ESA_WORLDCOVER_CLASSES\\)\\)\")"
+      "PowerShell(python -c \"from hydrokit.input.lulc import get_lulc, ESA_WORLDCOVER_CLASSES; print\\('import OK'\\); print\\('classes:', len\\(ESA_WORLDCOVER_CLASSES\\)\\)\")",
+      "Bash(python *)",
+      "Bash(python3 *)"
     ]
   }
 }
