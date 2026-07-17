@@ -1,7 +1,21 @@
 [project]
 name = "hydrokit"
 version = "0.1.0"
-dependencies = []
+dependencies = [
+    "geopandas",
+    "numpy",
+    "pandas",
+    "matplotlib",
+    "rasterio",
+    "rioxarray",
+    "xarray",
+    "shapely",
+    "pysheds",
+    "soilgrids",
+    "planetary-computer",
+    "pystac-client",
+    "odc-stac",
+]
 
 [tool.setuptools.packages.find]
 where = ["."]

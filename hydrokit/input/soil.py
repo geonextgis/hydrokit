@@ -166,7 +166,7 @@ def get_soil(reference_path, out_dir="soil"):
 
     west, south, east, north = bounds.left, bounds.bottom, bounds.right, bounds.top
 
-    variables = ["sand", "silt", "clay", "soc"]
+    variables = ["sand", "silt", "clay", "soc", "bdod"]
     depths = ["0-5cm", "5-15cm", "15-30cm", "30-60cm", "60-100cm", "100-200cm"]
 
     SoilGrids.MAP_SERVICES = MAP_SERVICES
@@ -241,6 +241,7 @@ class SoilWorkspace:
         "silt",
         "clay",
         "soc",
+        "bdod",
     )
 
     # Derived variables written to ``out_dir``.
@@ -249,6 +250,7 @@ class SoilWorkspace:
         "silt",
         "clay",
         "om",
+        "bdod",
         "theta33",
         "theta1500",
         "thetas",
@@ -261,7 +263,24 @@ class SoilWorkspace:
         "qtz",
         "dsat",
         "texture_class",
+        # HydroPy / TorchCrop coupling names (DATA_REQUIREMENTS.md §D)
+        "wcfc",
+        "wcwp",
+        "wcst",
+        "wcad",
+        "crairc",
+        "ksub",
     )
+
+    # Depth interval thicknesses in metres, for column integration.
+    DEPTH_THICKNESS_M = {
+        "0-5cm": 0.05,
+        "5-15cm": 0.10,
+        "15-30cm": 0.15,
+        "30-60cm": 0.30,
+        "60-100cm": 0.40,
+        "100-200cm": 1.00,
+    }
 
     def __init__(self, reference_path, soil_dir):
         self.reference_path = reference_path
@@ -288,6 +307,21 @@ class SoilWorkspace:
         var_dir = os.path.join(out_dir, name)
         os.makedirs(var_dir, exist_ok=True)
         out_path = os.path.join(var_dir, f"{name}_latlon_{center_depth}.tif")
+
+        data = np.asarray(arr, dtype=np.float32)
+        data = np.where(np.isfinite(data), data, self.nodata).astype(np.float32)
+
+        meta = self.base_meta.copy()
+        meta.update({"dtype": "float32", "count": 1, "nodata": self.nodata})
+
+        with rio.open(out_path, "w", **meta) as dst:
+            dst.write(data, 1)
+
+    def _write_flat_tif(self, arr, name, out_dir):
+        """Write a single-band (no-depth) layer as ``out_dir/name/name_latlon.tif``."""
+        var_dir = os.path.join(out_dir, name)
+        os.makedirs(var_dir, exist_ok=True)
+        out_path = os.path.join(var_dir, f"{name}_latlon.tif")
 
         data = np.asarray(arr, dtype=np.float32)
         data = np.where(np.isfinite(data), data, self.nodata).astype(np.float32)
@@ -367,6 +401,7 @@ class SoilWorkspace:
             silt_gkg = self._load_raw("silt", depth)  # g/kg
             clay_gkg = self._load_raw("clay", depth)  # g/kg
             soc_dgkg = self._load_raw("soc", depth)  # dg/kg
+            bdod_cgcm3 = self._load_raw("bdod", depth)  # cg/cm3
 
             # Convert to the units expected by the pedotransfer functions.
             # Saxton 2006 takes sand/clay as fractions and OM as percent.
@@ -375,6 +410,8 @@ class SoilWorkspace:
             clay_frac = clay_gkg / 1000.0
             soc_pct = soc_dgkg / 100.0  # dg/kg -> %
             om_pct = 1.724 * soc_pct  # Van Bemmelen factor
+            # Bulk density: cg/cm3 -> kg/m3  (1 cg/cm3 = 10 kg/m3)
+            bdod_kgm3 = bdod_cgcm3 * 10.0
 
             # --- Saxton 2006 --------------------------------------------
             theta33 = Theta_33_Saxton2006(sand_frac, clay_frac, om_pct)
@@ -406,6 +443,19 @@ class SoilWorkspace:
 
             texture_class = self._usda_texture_class(sand_p, silt_p, clay_p)
 
+            # --- HydroPy / TorchCrop coupling names ---------------------
+            # Aliases with units expected by the coupled models
+            # (see DATA_REQUIREMENTS.md §D).
+            wcst = thetas  # saturated water content [m3/m3]
+            wcfc = theta33  # field capacity [m3/m3]
+            wcwp = theta1500  # wilting point [m3/m3]
+            wcad = thetar  # air-dry water content [m3/m3]
+            ksub = ksat * 24.0  # mm/hr -> mm/d
+            # Critical air content: air-filled porosity at field capacity.
+            # Floor at the WOFOST/LINTUL5 default (0.06 m3/m3) to keep the
+            # oxygen-stress threshold physically sensible in dense soils.
+            crairc = np.maximum(thetas - theta33, 0.06)
+
             # Outputs follow the convention of docs/examples/reference: the
             # textural fractions and organic matter are stored in percent,
             # while hydraulic parameters stay in their computed units.
@@ -414,6 +464,7 @@ class SoilWorkspace:
                 "silt": silt_p,
                 "clay": clay_p,
                 "om": om_pct,
+                "bdod": bdod_kgm3,
                 "theta33": theta33,
                 "theta1500": theta1500,
                 "thetas": thetas,
@@ -426,6 +477,12 @@ class SoilWorkspace:
                 "qtz": qtz,
                 "dsat": dsat,
                 "texture_class": texture_class,
+                "wcst": wcst,
+                "wcfc": wcfc,
+                "wcwp": wcwp,
+                "wcad": wcad,
+                "crairc": crairc,
+                "ksub": ksub,
             }
 
             for name, arr in outputs.items():
@@ -433,11 +490,78 @@ class SoilWorkspace:
 
         print(f"Derived soil layers saved to '{out_dir}/'")
 
+    # ------------------------------------------------------- profile layers
+
+    def build_profile(self, out_dir="soil", rooting_depth_m=2.0):
+        """
+        Compute column-integrated soil parameters as single-band rasters.
+
+        Produces the layers listed in DATA_REQUIREMENTS.md §D that are
+        integrated over the full SoilGrids profile (0-200 cm):
+
+        - ``wcap`` [kg m-2] — water-holding capacity at field capacity,
+          integrated over the profile.
+        - ``wava`` [kg m-2] — plant-available water (FC - WP), integrated
+          over the profile.
+        - ``rdmso`` [m] — soil-limited maximum rooting depth. Written as a
+          uniform fill of ``rooting_depth_m`` over valid soil pixels; swap
+          in a bedrock-depth product when one is available.
+
+        Parameters
+        ----------
+        out_dir : str, optional
+            Directory that receives the per-variable subfolders. Default
+            ``"soil"``.
+        rooting_depth_m : float, optional
+            Constant to fill ``rdmso`` at valid pixels. Default ``2.0`` m
+            (the depth of the SoilGrids profile).
+        """
+        os.makedirs(out_dir, exist_ok=True)
+
+        h, w = self.base_meta["height"], self.base_meta["width"]
+        wcap = np.zeros((h, w), dtype=np.float32)
+        wava = np.zeros((h, w), dtype=np.float32)
+        valid_mask = np.zeros((h, w), dtype=bool)
+
+        for depth, thickness in self.DEPTH_THICKNESS_M.items():
+            sand_gkg = self._load_raw("sand", depth)
+            clay_gkg = self._load_raw("clay", depth)
+            soc_dgkg = self._load_raw("soc", depth)
+
+            sand_frac = sand_gkg / 1000.0
+            clay_frac = clay_gkg / 1000.0
+            soc_pct = soc_dgkg / 100.0
+            om_pct = 1.724 * soc_pct
+
+            theta33 = Theta_33_Saxton2006(sand_frac, clay_frac, om_pct)
+            theta1500 = Theta_1500_Saxton2006(sand_frac, clay_frac, om_pct)
+
+            # Column contribution per depth interval:
+            # theta [m3/m3] * thickness [m] * rho_w [kg/m3] = [kg/m2]
+            wcap += np.nan_to_num(theta33 * thickness * 1000.0, nan=0.0).astype(
+                np.float32
+            )
+            wava += np.nan_to_num(
+                (theta33 - theta1500) * thickness * 1000.0, nan=0.0
+            ).astype(np.float32)
+            valid_mask |= np.isfinite(theta33)
+
+        wcap = np.where(valid_mask, wcap, np.nan)
+        wava = np.where(valid_mask, wava, np.nan)
+        rdmso = np.where(valid_mask, rooting_depth_m, np.nan).astype(np.float32)
+
+        self._write_flat_tif(wcap, "wcap", out_dir)
+        self._write_flat_tif(wava, "wava", out_dir)
+        self._write_flat_tif(rdmso, "rdmso", out_dir)
+
+        print(f"Profile-integrated soil layers saved to '{out_dir}/'")
+
 
 def prepare_soil(reference_path, raw_dir="soil_raw", out_dir="soil"):
     """
     End-to-end soil preparation: download SoilGrids layers aligned to the
-    reference grid, then derive the hydraulic and textural parameters.
+    reference grid, derive the per-depth hydraulic and textural parameters,
+    and build the column-integrated coupling layers.
 
     Parameters
     ----------
@@ -451,4 +575,6 @@ def prepare_soil(reference_path, raw_dir="soil_raw", out_dir="soil"):
         Directory for the derived per-variable subfolders. Default ``"soil"``.
     """
     get_soil(reference_path, out_dir=raw_dir)
-    SoilWorkspace(reference_path, raw_dir).build(out_dir=out_dir)
+    workspace = SoilWorkspace(reference_path, raw_dir)
+    workspace.build(out_dir=out_dir)
+    workspace.build_profile(out_dir=out_dir)
